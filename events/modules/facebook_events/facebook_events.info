@@ -1,0 +1,4 @@
+name = Facebook Events
+description = Grab Facebook Events and load each one into its own node
+core = 7.x
+package = All My Modules

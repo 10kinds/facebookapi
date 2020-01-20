@@ -1,0 +1,4 @@
+name = Facebook Page to Node
+description = Grab Facebook Pages and load each one into its own node
+core = 7.x
+package = All My Modules

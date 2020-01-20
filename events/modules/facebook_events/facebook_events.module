@@ -1,0 +1,249 @@
+<?php
+
+/**
+ * Implements hook_permission().
+ */
+
+function facebook_events_permission() {
+  return array(
+	'administer facebook events' => array(
+	  'title' => t('Administer the Facebook Event Load Process'),
+	  'description' => t('Perform administration tasks for the Facebook Event Load Process.'),
+	),
+  );
+}
+
+/**
+ * Implements hook_help().
+ */
+
+function facebook_events_help($path, $arg) {
+  switch ($path) {
+	case "admin/help#facebook_events":
+	  return '' . t("Displays links to nodes created on this date") . '';
+      break;
+  }
+}
+
+/**
+ * Implements hook_menu().
+ */
+
+function facebook_events_menu() {
+	$items = array();
+
+	$items['addevent'] = array (
+	  'title' => 'Facebook Event Load Process',
+	  'page callback' => 'facebook_events_base',
+	  'access arguments' => array ('access content'),
+	);
+
+	$items['addevent/%'] = array (
+	  'title' => 'Facebook Event Load Process',
+	  'page callback' => 'facebook_events_addevent',
+	  'page arguments' => array(1),
+	  'access arguments' => array ('access content'),
+	  'file' => 'facebook_events.extra.inc',
+	);
+
+	return $items;
+}
+
+function facebook_events_base() {
+
+
+// This will get the FB IDs of all the Venue Content Types
+    $query = new EntityFieldQuery;
+    $query->entityCondition('entity_type', 'node')
+      ->entityCondition('bundle', 'venues')
+      ->propertyCondition('status', NODE_PUBLISHED);
+
+    $results = $query->execute();
+    $events_list = array();
+    if (isset($results['node'])) {
+      $nodes = node_load_multiple(array_keys($results['node']));
+
+      foreach ($nodes as $node) {
+        $fb_id = field_get_items('node', $node, 'field_fb_id');
+        $pageID = $fb_id[0]['value'];
+
+        $event = facebook_events_load_events($pageID);
+
+        array_push($events_list, $event);
+      }
+    }
+
+
+    $content = array (
+	  '#type' => 'markup',
+      '#markup' => drupal_set_message('<pre>' . print_r($events_list, 1) . '</pre>'),
+	);
+
+  return $content;
+
+}
+
+
+function facebook_events_load_events($pageID) {
+
+  //General Configuration
+  $access_token = "449025051937690|Q9WJHCYHhDyUr8Cuv6nodvRQO5Y";
+  $fields= "id,name,description,place,timezone,start_time,end_time,cover,category";
+
+  // Date params
+  //Get events for the next two years
+  $year_range = 2;
+
+  //Get today's Date and Time
+  $date = date_format(new \DateTime(), 'Y-m-d H:i:s');
+
+  //Set our dates for FB
+  $since_date = date("D M d, Y G:i");
+  $until_date = date('Y-01-01', strtotime('+' . $year_range . ' years'));
+
+  //Convert to unix Timestamp for Facebook
+  $since_unix_timestamp = strtotime($since_date);
+  $until_unix_timestamp = strtotime($until_date);
+
+  //Make the call to Facebook, retrieve json, and create the events array in $obj
+  $json_link = "https://graph.facebook.com/$pageID/events?fields={$fields}&date_format=U&access_token={$access_token}&since={$since_unix_timestamp}&until={$until_unix_timestamp}";
+  $json = file_get_contents($json_link);
+  $obj = json_decode($json, true, 512, JSON_BIGINT_AS_STRING);
+
+  // count the number of events
+  $event_count = count($obj['data']);
+  $node_test = array();
+
+  $events_added = array();
+
+  //// Loop through each event and build a node for it
+  for($x=0; $x<$event_count; $x++){
+    //// Start building our FB variables
+    $timezone = isset($obj['data'][$x]['timezone']) ? $obj['data'][$x]['timezone'] : "America/Chicago";
+	$start_time = strtotime($obj['data'][$x]['start_time']);
+	$end_time = isset($obj['data'][$x]['end_time']) ? strtotime($obj['data'][$x]['end_time']) : $start_time;
+
+	// No pictures for now
+	$pic_big = isset($obj['data'][$x]['cover']['source']) ? $obj['data'][$x]['cover']['source'] : "https://graph.facebook.com/{$pageID}/picture?type=large";
+	// The Event ID and the FB Page ID (to join on if we need to). We'll use this as our PK when we insert into the db
+	$eid = isset($obj['data'][$x]['id']) ? $obj['data'][$x]['id'] : 0;
+	$fbid = isset($obj['data'][$x]['place']['id']) ? $obj['data'][$x]['place']['id'] : 0;
+	// Name of the Event and name of FB Page ('cause it's easier for now)
+	$name = isset($obj['data'][$x]['name']) ? $obj['data'][$x]['name'] : "EVENT NAME FAILED";
+	$page_name = isset($obj['data'][$x]['place']['name']) ? $obj['data'][$x]['place']['name'] : "PAGE NAME FAILED";
+	// The Event description
+	$description = isset($obj['data'][$x]['description']) ? $obj['data'][$x]['description'] : "";
+	// Geolocation
+	$latitude = isset($obj['data'][$x]['place']['location']['latitude']) ? $obj['data'][$x]['place']['location']['latitude'] : 0.00;
+	$longitude = isset($obj['data'][$x]['place']['location']['longitude']) ? $obj['data'][$x]['place']['location']['longitude'] : 0.00;
+
+	// Category that will map to a taxonomy id
+	$category = isset($obj['data'][$x]['category']) ? $obj['data'][$x]['category'] : 'OTHER';
+
+	//// Begin building the node object
+	$node = new stdClass();
+	$node->type = "event";
+	$node->title = $name;
+	$node->language = LANGUAGE_NONE;
+	node_object_prepare($node);
+	$node->uid = 1;
+
+    // Let's add standard body field
+	$node->body[$node->language][0]['value'] = $description;
+	$node->body[$node->language][0]['summary'] = $description;
+	$node->body[$node->language][0]['format'] = 'filtered_html';
+
+	//// Load our custom fields
+	// Event ID (Unique) and FB Page ID
+	$node->{'field_event_id'}[$node->language][0]['value'] = $eid;
+	$node->{'field_ev_fb_id'}[$node->language][0]['value'] = $fbid;
+	$node->{'field_page_name'}[$node->language][0]['value'] = $page_name;
+	// Event Date values
+	$node->{'field_event_time'}[$node->language][0]['value'] = $start_time;
+    // isset for $end_time
+	$node->{'field_event_time'}[$node->language][0]['value2'] = $end_time;
+	$node->{'field_event_time'}[$node->language][0]['timezone'] = $timezone;
+	$node->{'field_event_time'}[$node->language][0]['timezone_db'] = 'UTC';
+	$node->{'field_event_time'}[$node->language][0]['date_type'] = 'datestamp';
+    // Geolocation
+    $node->{'field_geolocation'}[$node->language][0]['lat'] = $latitude;
+    $node->{'field_geolocation'}[$node->language][0]['lng'] = $longitude;
+
+    // Find and set the $tid
+	$vocabulary = taxonomy_vocabulary_machine_name_load('event_type');
+	$vid = $vocabulary->vid;
+    $cat_id = new EntityFieldQuery();
+    $cat_id->entityCondition('entity_type', 'taxonomy_term')
+      ->propertyCondition('vid', $vid)
+      ->fieldCondition('field_fb_category', 'value', '%' . $category . '%', 'like');
+    $cat_results = $cat_id->execute();
+
+    if (isset($cat_results['taxonomy_term'])) {
+      $tid_key = $cat_results['taxonomy_term'];
+      $tid = key($tid_key);
+    } else {$tid = 1634;}
+    // Set the $tid
+    $node->field_fb_ev_category[$node->language][]['tid'] = $tid;
+
+    // set our temporary path
+    if ($wrapper = file_stream_wrapper_get_instance_by_uri('public://')) {
+      $file_path = $wrapper->realpath();
+      $file_path = $file_path . '/event_covers/temp';
+    }
+    // create the fb_covers folder if it doesn't exist
+    if (!file_exists($file_path)) {
+      mkdir($file_path, 0755, true);
+    }
+    // Go get the FB cover photo
+    $getphoto = file_get_contents($pic_big);
+    $file_path = $file_path . '/' . $eid . '.jpg';
+    file_put_contents($file_path, $getphoto);
+
+    $file = (object) array(
+      'uid' => 1,
+      'uri' => $file_path,
+      'filemime' => file_get_mimetype($file_path),
+      'status' => 1,
+    );
+
+    // copy from the temp path to the permanent folder
+    $file = file_copy($file, 'public://event_covers');
+    $node->{'field_image'}[$node->language][0] = (array)$file;
+    // We're done with the image now. Let's wrap this up.
+
+    // Include node.pages to be able to get the node add form.
+    module_load_include('inc', 'node', 'node.pages');
+    $node_form = node_add($node->type);
+
+    // Create the form state for validation.
+    $form_state = array(
+      'values' => (array) $node,
+    );
+
+    // Validate the form.
+    node_form_validate($node_form, $form_state);
+
+    // Get the form errors.
+    $form_errors = form_get_errors();
+
+    // If there are no errors proceed to save the node.
+
+
+    if (empty($form_errors)) {
+
+      // Prepare node for a submit
+      $node = node_submit($node);
+      node_save($node);
+    }
+    unset($form_errors);
+
+  // End of the iteration
+
+    array_push($events_added, 'Added the event "' . $name . '" for page "' . $page_name . '"');
+  }
+
+  return $events_added;
+}
+
+
+
